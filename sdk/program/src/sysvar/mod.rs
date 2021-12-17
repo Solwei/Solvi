@@ -12,6 +12,8 @@ pub mod rewards;
 pub mod slot_hashes;
 pub mod slot_history;
 pub mod stake_history;
+pub mod fnode_data;
+
 
 pub fn is_sysvar_id(id: &Pubkey) -> bool {
     clock::check_id(id)
@@ -24,6 +26,7 @@ pub fn is_sysvar_id(id: &Pubkey) -> bool {
         || slot_history::check_id(id)
         || stake_history::check_id(id)
         || instructions::check_id(id)
+        || fnode_data::check_id(id)
 }
 
 #[macro_export]

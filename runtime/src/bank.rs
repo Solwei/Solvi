@@ -89,6 +89,7 @@ use solana_sdk::{
     feature,
     feature_set::{self, tx_wide_compute_cap, FeatureSet},
     fee_calculator::{FeeCalculator, FeeRateGovernor},
+    fnode_data::*,
     genesis_config::{ClusterType, GenesisConfig},
     hard_forks::HardForks,
     hash::{extend_and_hash, hashv, Hash},
@@ -99,6 +100,7 @@ use solana_sdk::{
     message::Message,
     native_loader,
     native_token::sol_to_lamports,
+    native_token::lamports_to_sol,
     nonce, nonce_account,
     process_instruction::{
         BpfComputeBudget, ComputeMeter, Executor, ProcessInstructionWithContext,
@@ -111,6 +113,8 @@ use solana_sdk::{
     slot_hashes::SlotHashes,
     slot_history::SlotHistory,
     system_transaction,
+    system_instruction::{SystemInstruction},
+    system_program,
     sysvar::{self},
     timing::years_as_slots,
     transaction::{self, Result, Transaction, TransactionError},
@@ -1199,6 +1203,7 @@ impl Bank {
         }
         bank.update_clock(None);
         bank.update_rent();
+        bank.update_fnode_data_frji();
         bank.update_epoch_schedule();
         bank.update_recent_blockhashes();
         bank
@@ -1398,6 +1403,7 @@ impl Bank {
             new.update_slot_hashes();
             new.update_stake_history(Some(parent_epoch));
             new.update_clock(Some(parent_epoch));
+            new.process_fnode_rewards(Some(parent_epoch));
             new.update_fees();
 
             return new;
@@ -1831,6 +1837,167 @@ impl Bank {
             )
         });
     }
+
+    fn add_fnode_data(&self, new_node_data : NodeData) {
+        self.update_sysvar_account(&sysvar::fnode_data::id(), |account| {
+            let mut fnode_data = account
+                .as_ref()
+                .map(|account| from_account::<FNodeData, _>(account).unwrap())
+                .unwrap();
+            //todo : implement add, modify, delete carefully
+            fnode_data.add(new_node_data);
+            create_account(
+                &fnode_data,
+                self.inherit_specially_retained_account_fields(account),
+            )
+        });
+    }
+
+    fn update_fnode_data_frji(&self) {
+        self.update_sysvar_account(&sysvar::fnode_data::id(), |account| {
+            let mut fnode_data = account
+                .as_ref()
+                .map(|account| from_account::<FNodeData, _>(account).unwrap())
+                .unwrap_or_default();
+            //todo : implement add, modify, delete carefully
+            fnode_data.new_frji();
+            create_account(
+                &fnode_data,
+                self.inherit_specially_retained_account_fields(account),
+            )
+        });
+    }
+
+    fn update_fnode_data(&self, new_node_data : FNodeData) {
+        self.update_sysvar_account(&sysvar::fnode_data::id(), |account| {
+//            let mut fnode_data = account
+//                .as_ref()
+//                .map(|account| from_account::<FNodeData, _>(account).unwrap())
+//                .unwrap_or_default();
+            // todo : implement add, modify, delete carefully
+            // fnode_data.add(self);
+            create_account(
+                &new_node_data,
+                self.inherit_specially_retained_account_fields(account),
+            )
+        });
+    }
+
+    fn process_fnode_rewards(&self, epoch: Option<Epoch>) {
+        /// rewards are distributed per epoch
+        /// ALLOCATED REWARDS for each node category are for per epoch i.e, per 432k blocks
+        /// FNodeData (RewardAddress, NodeType, TotalPaid, State) types- (PubKey, i8, u64, bool)
+        /// Phoenix, Noua, Fulgur with collaterals (20k,5k,2k) & ROI (30k, 7k, 2.6k)
+//        if epoch == Some(self.epoch()) {
+//            return;
+//        }
+        // let mut fnode_data : FNodeData = from_account(&self.get_account(&sysvar::fnode_data::id()).unwrap()).unwrap();
+        let mut fnode_data_orig : FNodeData = from_account::<FNodeData, _>(&self.get_account(&sysvar::fnode_data::id()).unwrap()).unwrap();
+        let mut fnode_data = fnode_data_orig.clone();
+        //todo : count no of nodes of each category
+        // let count_phoenix,count_noua,count_fulgur = node_count_type_from_vec();
+        // let per_node_reward_phoenix,per_node_reward_noua,per_node_reward_fulgur =
+        //      REWARD_PHOENIX/count_phoenix,REWARD_NOUA/count_noua,REWARD_FULGUR/count_fulgur
+
+        // Count no of nodes for each category -- PHOENIX, NOUA, FULGUR
+        let (mut count_phoenix, mut count_noua, mut count_fulgur) : (i32, i32, i32) = (1,1,1);
+        let fnode_data_iter = fnode_data.iter();
+        for fnode in fnode_data_iter
+        {
+            if fnode.1 == 0{
+                count_phoenix += 1;
+            }
+            else if fnode.1 == 1 {
+                count_noua += 1;
+            }
+            else {
+                count_fulgur += 1;
+            }
+
+        }
+
+        // todo : note:: check division by 0 panick
+        // Calculate Reward per node for each category - Phoenix, Noua, Fulgur
+        let per_node_reward_phoenix : u64 = sol_to_lamports(PER_EPOCH_REWARD_PHOENIX) / count_phoenix as u64;
+        let per_node_reward_noua : u64 = sol_to_lamports(PER_EPOCH_REWARD_NOUA) / count_noua as u64;
+        let per_node_reward_fulgur : u64 = sol_to_lamports(PER_EPOCH_REWARD_FULGUR) / count_fulgur as u64;
+
+        let mut index = 1;
+        let mut amount_to_pay : u64 =0;
+        while index < fnode_data.len()
+        {
+            if fnode_data[index].3 == true
+            { // state = active -- distribute rewards
+                if fnode_data[index].1 == 0{
+                    // update fnode.total_paid_out
+                    // if total_paid_out > MAX_PAY_PHOENIX => reward=M-total_paid_out, TP = M&
+                    // delete_node
+                    // distribute_fnode_reward(fnode.reward_address, reward_lamports);
+                    if fnode_data[index].2 + per_node_reward_phoenix >= sol_to_lamports(MAX_ROI_PHOENIX)
+                    {// MAX ROI reached, pay remaining if any and delete
+                        amount_to_pay = sol_to_lamports(MAX_ROI_PHOENIX) - fnode_data[index].2;
+                        fnode_data[index].2 = sol_to_lamports(MAX_ROI_PHOENIX);
+                        // distribute reward if any before deletion
+                        fnode_data.remove(index);
+                        index -= 1; // note : if not reduced it will skip next node iteration
+                        // above may lead to double reward of previous node
+                        // or mark it to be removed dont remove in this loop
+                        //break;
+                    }
+                    else {
+                        amount_to_pay = per_node_reward_phoenix;
+                        fnode_data[index].2 += amount_to_pay;
+                        //distribute reward here
+                        (fnode_data[index].0).log();
+                    }
+                    //distribute_reward(fnode_data[index].0, amount_to_pay)
+
+                }
+                else if fnode_data[index].1 == 1{
+                    if fnode_data[index].2 + per_node_reward_noua >= sol_to_lamports(MAX_ROI_NOUA)
+                    {   amount_to_pay = sol_to_lamports(MAX_ROI_NOUA) - fnode_data[index].2;
+                        fnode_data[index].2 = sol_to_lamports(MAX_ROI_NOUA);
+                        fnode_data.remove(index);
+                        index -= 1;
+                        //break;
+                    }
+                    else {
+                        amount_to_pay = per_node_reward_noua;
+                        fnode_data[index].2 += amount_to_pay;
+                        (fnode_data[index].0).log();
+                    }
+                    //distribute_reward(fnode_data[index].0, amount_to_pay)
+
+                }
+                else if fnode_data[index].1 == 2{
+                    if fnode_data[index].2 + per_node_reward_fulgur >= sol_to_lamports(MAX_ROI_FULGUR)
+                    {   amount_to_pay = sol_to_lamports(MAX_ROI_FULGUR) - fnode_data[index].2;
+                        fnode_data[index].2 = sol_to_lamports(MAX_ROI_FULGUR);
+                        fnode_data.remove(index);
+                        index -= 1;
+                        //break;
+                    }
+                    else {
+                        amount_to_pay = per_node_reward_fulgur;
+                        fnode_data[index].2 += amount_to_pay;
+                        (fnode_data[index].0).log();
+                    }
+                    //distribute_reward(fnode_data[index].0, amount_to_pay)
+                }
+
+            }
+            else {
+                // state = activating -- make it active and no rewards till next epoch
+                fnode_data[index].3 = true;
+            }
+            index += 1;
+        }
+
+        fnode_data_orig.replace_with(fnode_data);
+        //Store modified fnode_data
+        self.update_fnode_data(fnode_data_orig);
+    }
+
 
     fn update_slot_hashes(&self) {
         self.update_sysvar_account(&sysvar::slot_hashes::id(), |account| {
@@ -3211,7 +3378,7 @@ impl Bank {
         Vec<(Pubkey, AccountSharedData)>,
     ) {
         assert!(self.is_frozen(), "simulation bank must be frozen");
-
+        datapoint_info!("simulation");
         let batch = self.prepare_simulation_batch(transaction);
 
         let mut timings = ExecuteTimings::default();
@@ -3746,40 +3913,89 @@ impl Bank {
                             bpf_compute_budget.max_units,
                         )));
 
-                        process_result = self.message_processor.process_message(
-                            tx.message(),
-                            &loader_refcells,
-                            &account_refcells,
-                            &self.rent_collector,
-                            log_collector.clone(),
-                            executors.clone(),
-                            instruction_recorders.as_deref(),
-                            feature_set,
-                            bpf_compute_budget,
-                            compute_meter,
-                            &mut timings.details,
-                            self.rc.accounts.clone(),
-                            &self.ancestors,
-                        );
+                        // todo check for system_program TXs
+                        // if system_program && single inst && to==SysvarFnodeData then skip process_message(dont execute TX)
+                        // make FN(burn coins, populate sysvardata),  update capitalization
+                        let message = tx.message().clone();
+                        let inst_count = (&message).instructions.len();
+                        let instruction : &CompiledInstruction =  &message.instructions[0];
+                        let program_id = instruction.program_id(&message.account_keys);
 
-                        transaction_log_messages.push(Self::collect_log_messages(log_collector));
-                        inner_instructions.push(Self::compile_recorded_instructions(
-                            instruction_recorders,
-                            &tx.message,
-                        ));
-
-                        if let Err(e) = Self::refcells_to_accounts(
-                            &mut loaded_transaction.accounts,
-                            &mut loaded_transaction.loaders,
-                            account_refcells,
-                            loader_refcells,
-                        ) {
-                            warn!("Account lifetime mismanagement");
-                            process_result = Err(e);
+                        let mut to : Pubkey = Pubkey::default();
+                        let from : Pubkey = message.account_keys[0];
+                        let mut flag_fnode = false;
+                        let mut node_type : i8 = -1; // -1 bad_node_type
+                        if inst_count == 1 && program_id == &system_program::id() {
+                            let instruction2 = limited_deserialize(&instruction.data).unwrap();
+                            match instruction2 {
+                                SystemInstruction::Transfer { lamports } => {
+                                    to = message.account_keys[1];//instruction.accounts[1];
+                                    if &to == &sysvar::fnode_data::id() {
+                                        //fnode_creation tx
+                                        match lamports_to_sol(lamports) {
+                                            COLLATERAL_PHOENIX => {node_type = 0}
+                                            COLLATERAL_NOUA => {node_type = 1}
+                                            COLLATERAL_FULGUR => {node_type = 2}
+                                            _ => {}
+                                        }
+                                        if node_type != -1 {
+                                            flag_fnode = true;
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
                         }
+                        // todo : check if burn fails
+                        if flag_fnode == true {
+                            // burn & update_cap
+                            datapoint_info!("create_fnode");
 
-                        if process_result.is_ok() {
-                            self.update_executors(executors);
+
+                            // add data to sysvarFNodeData
+                            let new_fnode : NodeData = (from.clone(), node_type, 0 as u64, false);
+                            if !self.is_frozen() {
+                                self.add_fnode_data(new_fnode);
+                            }
+
+
+                        }
+                        else {
+                            process_result = self.message_processor.process_message(
+                                tx.message(),
+                                &loader_refcells,
+                                &account_refcells,
+                                &self.rent_collector,
+                                log_collector.clone(),
+                                executors.clone(),
+                                instruction_recorders.as_deref(),
+                                feature_set,
+                                bpf_compute_budget,
+                                compute_meter,
+                                &mut timings.details,
+                                self.rc.accounts.clone(),
+                                &self.ancestors,
+                            );
+
+                            transaction_log_messages.push(Self::collect_log_messages(log_collector));
+                            inner_instructions.push(Self::compile_recorded_instructions(
+                                instruction_recorders,
+                                &tx.message,
+                            ));
+
+                            if let Err(e) = Self::refcells_to_accounts(
+                                &mut loaded_transaction.accounts,
+                                &mut loaded_transaction.loaders,
+                                account_refcells,
+                                loader_refcells,
+                            ) {
+                                warn!("Account lifetime mismanagement");
+                                process_result = Err(e);
+                            }
+
+                            if process_result.is_ok() {
+                                self.update_executors(executors);
+                            }
                         }
                     } else {
                         transaction_log_messages.push(None);
