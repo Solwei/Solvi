@@ -2726,9 +2726,9 @@ dependencies = [
 
 [[package]]
 name = "ouroboros"
-version = "0.10.0"
+version = "0.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f0e3827c8742f21283e9374adf7905984e7b85731ad94a203137b56955d818b3"
+checksum = "71643f290d126e18ac2598876d01e1d57aed164afc78fdb6e2a0c6589a1f6662"
 dependencies = [
  "aliasable",
  "ouroboros_macro",
@@ -2737,9 +2737,9 @@ dependencies = [
 
 [[package]]
 name = "ouroboros_macro"
-version = "0.10.0"
+version = "0.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1ef06077e08eac7e2aeaacfbd113a25fcb1b9b903437bd89d2bd513da6e04112"
+checksum = "ed9a247206016d424fe8497bc611e510887af5c261fbbf977877c4bb55ca4d82"
 dependencies = [
  "Inflector",
  "proc-macro-error",
